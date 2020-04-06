@@ -1,0 +1,772 @@
+---
+title: "CitiBike Report"
+author: "Evan Colony, Jake Gandolfo, Lisa Duong, Safwaan Mir, Youssef Afify"
+date: "12/10/19"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+Packages that we will use throughout the Rmd
+
+```{r results='hide'}
+library(dplyr, warn.conflicts=FALSE, quietly=TRUE)
+library(ggplot2, warn.conflicts=FALSE, quietly=TRUE)
+library(leaflet, warn.conflicts=FALSE, quietly=TRUE)
+library(lubridate, warn.conflicts=FALSE, quietly=TRUE)
+library(kableExtra, warn.conflicts=FALSE, quietly=TRUE)
+library(geosphere, warn.conflicts=FALSE, quietly=TRUE)
+```
+
+First, all this data was seperated by month into multiple CSVs, which we had to condense into one fullData file. After this, because there was so much data we had to take a sample. The code for these operatins is shown (but not evaluated) below:
+
+```{r eval=FALSE}
+dataLocations <- list.files("C:/randomFiles/TOClasses/TO404/citiBike", full.names = TRUE)
+# This list has more than what we want, so we need to remove all the values that are not the monthly CSVs
+dataLocations <- dataLocations[-13:-18]
+
+data1 <- read.csv("201801-citibike-tripdata.csv")
+data2 <- read.csv("201802-citibike-tripdata.csv")
+data3 <- read.csv("201803-citibike-tripdata.csv")
+data4 <- read.csv("201804-citibike-tripdata.csv")
+data5 <- read.csv("201805-citibike-tripdata.csv")
+data6 <- read.csv("201806-citibike-tripdata.csv")
+data7 <- read.csv("201807-citibike-tripdata.csv")
+data8 <- read.csv("201808-citibike-tripdata.csv")
+data9 <- read.csv("201809-citibike-tripdata.csv")
+data10 <- read.csv("201810-citibike-tripdata.csv")
+data11 <- read.csv("201811-citibike-tripdata.csv")
+data12 <- read.csv("201812-citibike-tripdata.csv")
+
+fullData <- bind_rows(data1, data2, data3, data4, data5, data6, data7)
+fullData$start.station.id <- as.factor(fullData$start.station.id)
+fullData$end.station.id <- as.factor(fullData$end.station.id)
+fullData <- bind_rows(fullData, data8, data9, data10, data11, data12)
+# Write the csv for future use
+write.csv(fullData, "fullData.csv")
+```
+
+Before we move on to get our random sample, we first checked for any data that should be kept as a factor. We decided that gender, userType, bikeid, and the stationids as factors
+
+```{r eval=FALSE}
+fullData$gender <- as.factor(fullData$gender)
+fullData$usertype <- as.factor(fullData$usertype)
+fullData$bikeid <- as.factor(fullData$bikeid)
+fullData$end.station.id <- as.factor(fullData$end.station.id)
+fullData$start.station.id <- as.factor(fullData$start.station.id)
+```
+
+Now, we take a random sample and write it to a CSV to ensure all members test on the same data.
+
+```{r eval=FALSE}
+testData <- sample_frac(full, .01)
+write.csv(testData, "testData.csv")
+```
+
+The below code is for simplicity of work for now
+
+```{r}
+test <- read.csv("fullData.csv")
+test$bikeid <- as.factor(test$bikeid)
+test$gender <- as.factor(test$gender)
+test$starttime <- as.character(test$starttime)
+test$stoptime <- as.character(test$stoptime)
+test$X <- NULL
+
+# Removes the Canada Stations
+test <- test %>%
+  filter(start.station.latitude < 43)
+
+test <- test %>%
+  mutate(pastTime = hour(starttime) *60 + minute(starttime) + second(starttime)/60)
+```
+
+With the test data now extracted, we then need to understand the data.
+
+# Question 1: Understand the data
+
+Download all the monthly data and combine to create a 2018 year dataset. Explore the dataset to calculate descriptive statistics. Do exploratory visualization to better understand the dataset.
+
+## Data Cleaning
+
+### Fixing trip duration errors
+
+```{r}
+# Here, we are adding a column that shows the tri duration in minutes instead of seconds, which is easier for us to understand
+test$tripDurationMin <- test$tripduration/(60)
+#Looking at a brief overview of how long trips take. 
+summary(test$tripDurationMin)
+```
+
+```{}
+It is safe to assume that no trip actually takes `r max(test$tripDurationMin)` minutes (which is `r max(test$tripDurationMin)/(60*12)` days). However, we will not remove these data points because these bikes are still in use (and returned) and someone is still paying for every minute that these bikes are left out. Essentially, these times mean that someone forgot to return the bike to its station.
+```
+
+
+### Changing Gender Integers to Strings
+
+```{r}
+# First, we assign the name of the gender to each numebr
+levels(test$gender) <- c("Unkown", "Male", "Female")
+summary(test$gender)
+```
+
+```{}
+Here we see that there are significanlty more uses by males than any other gender. We also see a lot of use by the Unknown gender type, which means that no data was collected on the gender of these users.
+```
+
+
+```{r}
+#Adding a column to the dataframe for generation. This would help in marketing should the company want to target specific customers and to analyze differences by differnt generations
+test$generation <- ifelse(test$birth.year >= 1934 & test$birth.year < 1946, "Silent Gen", ifelse(test$birth.year >= 1946 & test$birth.year <= 1964, "Baby Boomer",ifelse(test$birth.year >= 1965 & test$birth.year <= 1979, "Gen X", ifelse(test$birth.year >= 1980 & test$birth.year <= 1994, "Millennials", ifelse(test$birth.year >= 1995, "Gen Z", NA)))))
+test$generation <- as.factor(test$generation)
+```
+
+### Adding and Analysing Age
+
+```{r}
+# We also use birth year to calculate age to make some analyses more descriptive
+test$age <- 2019 - test$birth.year
+
+summary(test$age)
+```
+
+```{}
+This shows a couple things. First, there seems to be some impposible data, specefically, there is no one alive that is 134. We think that a good upper bound for age is 85. With this in mind, we will go back and place NA for all values of age over 85 and any corresponding birthyear that would provide that output. We also see a lower bound of 17, which could be articially imposed for liability reasons.
+```
+
+```{r}
+# Requires: X is the checking value, Y is the value ot be changed based on the check
+# Effects: Sets the value of Y to NA if X meets a certian condition
+fixAge <- function(x) {
+  if (x > 85) {
+    NA
+  } else {
+    x
+  }
+}
+
+
+fixYear <- function(x) {
+  if (x < 2019 - 85) {
+    NA
+  } else {
+    x
+  }
+}
+
+# Replaces invalid ages with NA
+test$birth.year <- sapply(test$birth.year, FUN=fixYear)
+test$age <- sapply(test$age, FUN=fixAge)
+summary(test$age)
+summary(test$birth.year)
+```
+
+## Descriptive Statistics
+
+### Age
+
+```{r}
+ggplot(test, aes(x=usertype, y=age)) + geom_boxplot() + labs(x = "User Type", y = "Age", title = "Breakdown of Age by User Type")
+```
+
+```{}
+50% of subsribers are between 30 to ~45 years old, with the median age being ~25 and some outliers above ~75. On the other hand, customer's age is more widespread and median age is higher at 50.
+```
+
+### Origin Duration
+
+```{}
+Next, we wanted to break down trip duration by station. Each station is in a different location around New York City, and we wanted to see the average trip duration by station to see if some stations take longer to get to. 
+```
+
+```{r}
+#Most popular Start stations
+startstation=group_by(test,start.station.name)%>%
+  summarise(
+    count=n()
+  )%>%
+arrange(desc(count))
+print(startstation)
+```
+
+```{r}
+# This gets the average trip duration from each start station
+duration_minutes_start <- tapply(test$tripDurationMin, test$start.station.name, median)
+
+barplot(duration_minutes_start, main = "Trip Duration by Origin Location", ylab = "Durations (Minutes)", xlab= "Location")
+```
+
+```{}
+We see that most trips look fairly simialr, however, there are some large outliers.
+```
+
+```{}
+The graph shows that most trips take, on average, less than `r round(as.numeric(duration_minutes_start[duration_minutes_start == max(duration_minutes_start, na.rm = TRUE)]), 0)` from all but a few starting locations. The max trip in this example is `r round(as.numeric(duration_minutes_start[duration_minutes_start == max(duration_minutes_start, na.rm = TRUE)]), 0)` minutes from `r names(duration_minutes_start[duration_minutes_start == max(duration_minutes_start, na.rm = TRUE)])`.
+```
+
+### Destination Duration
+```{r}
+#most popular End stations
+endstation=group_by(test, end.station.name)%>%
+  summarise(
+    count=n()
+  )%>%
+arrange(desc(count))
+print(endstation)
+```
+
+```{r}
+#We are also curious to see if any destination stations have significantly high median trip durations. 
+duration_by_end <- tapply(test$tripDurationMin, test$end.station.name, median)
+barplot(duration_by_end, main = "Trip Duration by Destination", ylab = "Durations (Minutes)", xlab= "Location")
+```
+
+```{}
+In this graph we see much higher outlier values for durations.
+```
+
+```{}
+The max trip in this example is `r round(as.numeric(duration_by_end[duration_by_end == max(duration_by_end, na.rm = TRUE)]), 0)` minutes from `r names(duration_by_end[duration_by_end == max(duration_by_end, na.rm = TRUE)])`
+```
+
+```{}
+These high outlier trips, whole not useful for speed or other similar statistics, are aactually important becasue they still represent revenue for CitiBike; someone will pay for that bike usage. The differences between the 2 plots with the outliers still in leaves some interesting room for interpretation as it shows that, when looking at destinations, some have significantly higher median trip times than their origin counterpart duration. This is certinaly something to investigate futher later. For now, it is just good to know.
+```
+
+### User Type
+```{r}
+summary(test$usertype)
+barplot(table(test$usertype), main = "Distribution of user type", col = rainbow(3), density = 50)
+```
+
+
+```{}
+There are significantly more subscribers than Customers. It is unlikely that a difference this large is due to viewing a subset of the overall data. It does make sense that there are more subscribers, since they pay for the service and what to get their money's worth.
+```
+
+
+```{r}
+barplot(tapply(test$tripDurationMin, test$usertype, median, na.rm = TRUE), ylim=c(0,25))
+```
+
+```{}
+This data and the accompanying bar graph show that customers spend signifincantly more time on the bikes than subscribers do. 
+```
+
+### Gender
+
+```{}
+We wanted to see if there is a difference between the gender of people who ride Citibike: could this account for the customer subscriber difference?
+```
+
+```{r}
+table(test$gender)
+
+#Now, we would like to see if there is a difference in trip duration by gender.
+barplot(tapply(test$tripDurationMin, test$gender, median))
+```
+
+```{}
+Can the difference in male and female users be explained by Usertype?
+```
+
+```{r}
+table((test %>% filter(usertype=="Customer"))$gender)
+
+table((test %>% filter(usertype=="Subscriber"))$gender)
+```
+
+```{}
+The large difference in males to females is because most of Citibikes subscribers are males. Citibike may want to make a push towards getting more women subscribers as a means of possible revenue growth. 
+```
+
+### Generation
+```{r}
+barplot(sort(table(test$generation)), main = "Distribution by Generation ", col = rainbow(5), xlab = "Generation", ylab = "Number of Riders")
+```
+
+```{}
+Most of the Citibike's users are Millenials and GenX, who are likely to be in the labor force.This makes sense because most users are also subscribers, meaning they should have sustainable income to afford the fee.  
+```
+
+### Distance and Speed Data
+```{r}
+# Distance Travelled and speed
+calc_station_dist <- function(test){
+          start <- cbind(as.numeric(test$start.station.latitude), as.numeric(test$start.station.longitude))
+          end <- cbind(as.numeric(test$end.station.latitude), as.numeric(test$end.station.longitude))
+    distHaversine(start,end)
+}
+test$dist= calc_station_dist(test)
+# Distance calculated in meters
+test$speed= (test$dist/test$tripDurationMin)
+#Speed found in Meters per minute
+test$mph= (test$speed*0.0372823)
+#Converting to mph
+#Here I am trying to get mean speed by bikeid, can do same by gender or customer type etc, but meanspeed by bikeid and maybe by route is useful
+hist(test$mph, main="Number of Trips by Speed", xlab= "Speed in MPH", ylab="Number of Trips",)
+
+```
+
+```{}
+Here we see that the speed follows a right skewed distribution, the meadian is below the mean. The meadian speed of this data is `r median(test$mph, na.rm=TRUE)`.
+```
+
+### Bike ID
+```{}
+As a company we want to analyze which of our bikes have the most usage, we can sort our bikes with the longest time checked out and the farthest haversine distance travelled
+```
+
+```{r}
+bikeiddata <- test%>%
+  group_by(bikeid) %>% 
+  summarise(bikecount = n(), meantime = mean(tripduration, na.rm = TRUE), meandist= mean(dist), mph= mean(mph), age= mean(age)) %>% 
+  mutate(totaltriptime = meantime*bikecount)  %>% 
+  mutate(totaltripdist = meandist*bikecount) 
+bikeiddata <- bikeiddata[order(bikeiddata$totaltriptime),]
+bikeiddatax <- bikeiddata[-which(bikeiddata$totaltriptime>50000),]
+hist(bikeiddatax$totaltriptime, main="Number of Bikes by Total Tread", xlab= "Total Travel Time in Minutes", ylab="Number of Bikes", col = rainbow(7))
+```
+
+```{}
+Here see that, as total travel time increases, the number of bikes that have traveled that long generally tend to decrease.
+```
+
+
+```{r}
+ggplot(data=bikeiddatax, aes(x=totaltriptime)) + geom_histogram(color="black", fill="white") + geom_density( fill="#FF6666")  + ggtitle("Number of Bikes by Total Time Traveled") +
+  xlab("Total Time") + ylab("Number of Bikes")
+```
+
+```{}
+Here we see a similar distribution to that of speed. Some bikes are used a lot, which skews the graph to the right, but overall, there is less usage than the mean would suggest, with the median at `r median(bikeiddata$totaltriptime, na.rm=TRUE)`.
+```
+
+```{r}
+ggplot(data=bikeiddatax, aes(x=totaltripdist)) + geom_histogram(color="black", fill="white") + geom_density( fill="#FF6666") +  ggtitle("Number of Bikes by Total DistanceTraveled") +
+  xlab("Total Distance") + ylab("Number of Bikes")
+
+```
+
+```{}
+Seems like there are more bikes that are far above the mean of bikes for totaltriptime then totaltripdist, even with extreme totaltriptime outliers removed. Lets look further to see how each bike looks comparing the total distance traveled and the total trip time
+```
+
+```{r}
+baseplot <- ggplot(data=bikeiddatax, aes(x=totaltriptime, y=totaltripdist))
+baseplot + geom_point() + geom_smooth() + ggtitle("Bike Total Distance Traveled vs Total Time Traveled") +
+  xlab("Total Time") + ylab("Total Distance")
+```
+
+```{r}
+test1 <- bikeiddata %>%
+  arrange(desc(totaltripdist)) %>%
+  slice(1:10) %>%
+  select(bikeid)
+```
+
+```{}
+These are the top ten bikes that were used for each metric: 
+Bikecount: `r bikeiddata$bikeid[sort(bikeiddata$bikecount, decreasing = T)[1:10]]` 
+Trip Distance: `r test1$bikeid`
+```
+
+```{}
+Now lets analyze what the average speed of a bike is and which bikes are the fastest
+```
+
+```{r}
+
+baseplot <- ggplot(data=bikeiddata, aes(x=mph))
+baseplot + geom_histogram( colour="black", fill="white") + geom_density(alpha=.2, fill="#FF6666") + ggtitle("Bike Average Speed") + xlab("Average Speed in MPH") + ylab("Number of Bikes") + geom_vline(aes(xintercept=mean(mph)),
+color="blue", linetype="dashed", size=1)
+
+ggplot(bikeiddata, aes(x=mph)) + geom_histogram(aes(y=..density..), colour="black", fill="white") + geom_density(alpha=.2, fill="#FF6666")
+```
+
+```{}
+Seems to a certain point the amount of time that a bike is checked out correlates to the distance it is travelling, but at extreme values of triptime there seems to be an uncertain correlation for a company making its decision on what way to best service bikes the company should service those bikes with the largest total triptime and those with the largest totaltrip distance first, Why? Both these metrics dmonstrate how much tread tires have undergone and wear the bike has recieved.
+```
+
+```{}
+Now lets quickly find the fastest bikes by avg mph and compare how far each has traveled
+```
+
+```{r}
+#Avg Speed of Fastest Bikes
+fastestbikes <- bikeiddata[order(-bikeiddata$mph),]
+fastestbikes<- head(fastestbikes, 10)
+baseplot <- ggplot(data=fastestbikes, aes(x=totaltripdist, y=mph, color=bikeid))
+baseplot + geom_jitter() + ggtitle("Fastest Bikes by Total Distance and Average Speed") +
+  xlab("Total Distance") + ylab("Average Speed")
+```
+
+### All Used Station Combos
+```{r}
+results <- test %>%
+  group_by(start.station.name, end.station.name) %>%
+  select(start.station.name, end.station.name, tripDurationMin) %>%
+  summarise(avgTrip = median(tripDurationMin, na.rm = TRUE), count= n()) %>%
+  distinct()
+
+
+results <- results[order(-results$count),]
+results <- head(results, 10)
+
+
+results$combined <- paste(results$start.station.name, "->", results$end.station.name)
+p <- ggplot(results, aes(x = combined, y = avgTrip, fill = combined)) + geom_bar(stat = "identity")  + ggtitle("Trip Duration by Popular Start-End Locations")+ theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) + labs(y= "Trip Duration (in minutes)" ,fill = "Start-End Location Pairs")
+
+p + theme(legend.text = element_text(colour="black", size=5, 
+                                     face="bold"))
+```
+
+```{}
+Here we see that there are a large range of travel times to the various different locatiosn, however the overwhelming amount seem to take less than 6 minutes. The longest trip duratrion is actuall a loop in central park, which probably means these people are simply taking the bikes out for a simple ride.
+```
+
+
+```{r}
+results <- test %>%
+  group_by(start.station.name, end.station.name) %>%
+  select(start.station.name, end.station.name, mph) %>%
+  summarise(avgTrip = median(mph, na.rm = TRUE), count= n()) %>%
+  distinct()
+
+
+results <- results[order(-results$count),]
+results <- head(results, 10)
+
+
+results$combined <- paste(results$start.station.name, "->", results$end.station.name)
+p <- ggplot(results, aes(x = combined, y = avgTrip, fill = combined)) + geom_bar(stat = "identity")  + ggtitle("Avg Speed by Popular Start-End Locations")+ theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) + labs(y= "Speed in MPH" ,fill = "Start-End Location Pairs")
+
+p + theme(legend.text = element_text(colour="black", size=5, 
+                                     face="bold"))
+```
+
+```{}
+Here we see that the averaege speed for the most popular loactinos is just over 6 MPH with only one location with data coming in below 6. 
+
+NOTE: Some of these bars don't show up because there is no speed data for them, even though they are a very popular route. This is becasue their start and end locations are generally the exact same, if not always.
+```
+
+
+# Question 2: Identify patterns in the ride history data
+
+Explain/illustrate these patterns using appropriate visualization. This is purposely open ended. You are expected to pose interesting questions and answer them (e.g. does the ridership pattern differ between weekdays and weekends?)
+
+## Data Manipulation
+```{r}
+#Creating column for weekday and time in day
+test$weekday <- wday(test$starttime)
+test$timeInDay <- ifelse(hour(test$starttime) >= 4 & hour(test$starttime) < 12, "morning", ifelse(hour(test$starttime) >= 12 & hour(test$starttime) < 16, "afternoon",ifelse(hour(test$starttime) >= 16 & hour(test$starttime) < 20, "evening", "night")))
+```
+
+## Daily Trend
+```{r}
+# The y axis represents the proportion of rides at each point along the day
+ggplot(test, aes(x=pastTime)) + geom_density() + labs(x="Minutes past Midnight", y = "Proportion of Rides") + ggtitle("Distribution of Rides Per Day")
+```
+
+```{}
+The distribution changes significantly by time. People start commuting around 6am and the number of riders increases steeply until it peeks at around 8.30am. Ridership decreased and hovered between 10am and 3pm, before it peaks again at 6pm. This trend correlates with normal working hours, strengthening our assumption that most of Citibike's users are in the labour force. 
+```
+
+## Day Trend
+```{r}
+test$weekday <-as.character(test$weekday) #from 1 for Sunday to 7 for Saturday
+ggplot(test, aes(x=pastTime, colour = weekday)) + geom_density() + labs(x="Minutes past Midnight", y = "Proportion of Rides") + ggtitle("Distribution of Rides By Day")
+```
+
+```{}
+This graph is a more detailed version of the Weekday/Weekend graph. Days 2-6 are weekdays and days 1 and 7 are weekend days. The genearl trend holds however you can see that, on day 6 (Friday) people begin to use the system much earlier, which may be an indication of people leaving work early on a Friday. This culminates in a slightly earlier peak as well, meaning that the biggest outflix of people is even earlier than the average weekday.  
+```
+
+## Day Type Trend
+```{r}
+test <- test %>%
+  mutate(dayType = ifelse(weekday==1 | weekday == 7, "Weekend", "Weekday"))
+
+ggplot(test, aes(x=pastTime, colour = dayType)) + geom_density() + labs(x="Minutes past Midnight", colour = "Day Type", y = "Proportion of Rides", title = "Difference in Daily Ride Distribution")
+```
+
+```{}
+Ridership pattern changes by day type. During weekdays, people commute mostly at 8.30am and 6pm. As for weekends, the demand peaks at 12pm and gradually decreases until around 6pm, where it starts dropping more steeply. We can infer that most poeple start their days late in weekends, and since concentration is not high, riders have different schedules during weekends. 
+```
+
+## Generation Trends
+```{r}
+ggplot(test, aes(x=pastTime, colour = generation)) + geom_density() + labs(x="Minutes past Midnight", colour = "Day Type", y = "Proportion of Rides", title = "Difference in Daily Ride Distribution")
+```
+
+```{}
+While ridership pattern of subscriber matches peak hours, that of customer does not. It increases constantly as time passes and peaks at around 1pm. This suggests customers and subscribers use Citibike for differnet purposes. It's also interesting to see pattern for customer similar to unknown gender from previous graph, implying that customers isn't meticulous when providing perosnal information 
+```
+
+## Gender Trends
+```{r}
+ggplot(test, aes(x=pastTime, colour = gender)) + geom_density() + labs(x="Minutes past Midnight", colour = "Day Type", y = "Proportion of Rides", title = "Difference in Daily Ride Distribution")
+```
+
+```{}
+The daily ride distribution shows that there are clear peak times during the day for ridership. Male and Female ridership exhibit similar patterns, with both of them peaking at approximately 8:20 AM, and 5:20 PM. This makes sense, since these hours are rush hours for working people. However, we did notice that people with an "Unknown" gender exhibit a different ridership pattern. This is likely random. 
+```
+
+# Question 3: Assymetric Traffic
+
+Stations running out of bikes because of assymetric traffic (arrivals and departures are not equal, either arrival >> departure or departure >> arrival) is a big problem. Client would want to know which stations are candidates for increasing bike storage capacity. Client would like to see these stations on a map based visualization.
+
+## Notes
+```{}
+For this question, we have decided to focus on longterm flow. While there is an effect of daily flow we believe that this is less important. If one location gets way to many bikes or loses a bikes in the morning, odds are it will balance out when people return to where they came from. We actually care about the overflow that builds up in the long run. This would be indicative of stations that should have capacity enlarged to better accomodate overflow and stockouts or those that may need more regular reallocation of bikes (say every couple days rather than at 11 AM every morning).
+```
+
+## Data
+
+### Getting Stations and Flows
+```{r}
+# Get a stations outDegree
+stationGroup_temp <- test %>%
+  group_by(end.station.name) %>%
+  summarise(inDegree=n()) %>%
+  rename(stationName = end.station.name)
+
+# Get a stations inDegree
+stationGroup <- test %>%
+  group_by(start.station.name, start.station.latitude, start.station.longitude) %>%
+  summarise(outDegree=n()) %>%
+  rename(stationName = start.station.name)
+
+# Join the frames and removes the old one
+stationGroup <- full_join(stationGroup_temp, stationGroup, by="stationName")
+remove(stationGroup_temp)
+
+# Replace with NA those stations that do not have a name
+stationGroup[stationGroup == "NULL"] <- NA
+
+# Gets rid of all the rows with NA
+stationGroup <- stationGroup[complete.cases(stationGroup[,1:3]),]
+
+# Calculates overFlow and makes a messeage
+stationGroup <- stationGroup %>%
+  mutate(overFlow=inDegree - outDegree)
+stationGroup <- stationGroup %>%
+  mutate(message = paste(stationName, paste("Overflow: ", overFlow), sep='\n'))
+```
+
+## Map
+
+### Icon Import
+```{r}
+#Changing map markers to bikes
+station <- data.frame(distinct(test,start.station.name, start.station.latitude, start.station.longitude))
+
+# Replace with NA those stations that do not have a name
+station[station == "NULL"] <- NA
+
+# Gets rid of all the rows with NA
+station <- station[complete.cases(station[,1:3]),]
+
+testMap <- leaflet() %>%
+  addTiles() %>% 
+  addMarkers(lat = station$start.station.latitude, lng = station$start.station.longitude, popup = station$stationName, clusterOptions = markerClusterOptions())
+
+testMap
+```
+
+### Finding Outliers
+```{r}
+getColor <- function(hm) {
+  sapply(hm$overFlow, function(overFlow) {
+  if(overFlow <= quantile(stationGroup$overFlow, .95, na.rm = TRUE) & 
+     overFlow >= quantile(stationGroup$overFlow, .05, na.rm = TRUE)) {
+    "green"
+  } else if(overFlow >= quantile(stationGroup$overFlow, .99, na.rm = TRUE) | 
+            overFlow <= quantile(stationGroup$overFlow, .01, na.rm = TRUE)) {
+    "red"
+  } else {
+    "orange"
+  } })
+}
+
+icons <- awesomeIcons(
+  icon = 'ios-close',
+  iconColor = 'black',
+  library = 'ion',
+  markerColor = getColor(stationGroup)
+)
+```
+
+### Map Placement
+```{r}
+# station <- data.frame(distinct(test,start.station.name, start.station.latitude, start.station.longitude))
+testMap <- leaflet() %>%
+  addTiles() %>% 
+  addAwesomeMarkers(lat = stationGroup$start.station.latitude, lng = stationGroup$start.station.longitude, popup = stationGroup$message, clusterOptions = markerClusterOptions(), icon=icons)
+
+testMap
+```
+
+```{}
+The above map shows all the stations that were not removed in above discussions. The stations marker appears red if it is in the top or bottom  1% of all values of overflow and it appears orange if it is in the top or bottom 5% of all data of overflow. The data was made two tailed to ensure that we get a similar amount of under- and overflow colored on the map.
+```
+
+## Summary
+
+### Worst Stations
+
+```{r}
+top10Worst <- stationGroup %>%
+  arrange(desc(overFlow)) %>%
+  slice(1:10) %>%
+  select(stationName, overFlow)
+
+bot10Worst <- stationGroup %>%
+  arrange(overFlow) %>%
+  slice(1:10) %>%
+  select(stationName, overFlow)
+```
+
+```{}
+Stations that get the most Overflow:
+```
+
+```{r}
+top10Worst %>% 
+  select(Station = stationName,
+         `Over Flow`=overFlow) %>% 
+  kable() %>%  
+  kable_styling(c("striped", "hover", "condensed"), full_width = F)
+```
+
+```{}
+Stations that got used the most:
+```
+
+```{r}
+bot10Worst %>% 
+  select(Station = stationName,
+         `Over Usage`=overFlow) %>% 
+  kable() %>%  
+  kable_styling(c("striped", "hover", "condensed"), full_width = F)
+```
+
+```{}
+These two different sets of 10 statinos are great places to start working. CitiBike could move bikes from the first set of 10 and transfer them to the second set of time at specefic times throughout the year to ensure that each station maintains a good working level. Adding extra capacity also wouldn't be an awful idea. One issue that is vital to note here is that over flow seems to be a much more prevelant issue than over usage.
+```
+
+# Question 4: Impact of Weather
+
+Client wants to know the impact of weather (temperature, rain, snow, wind) on the CitiBike system. You are asked to find an appropriate data source for 2018 weather data and use it for your analysis.
+
+## Data Manipulation
+
+### Adding Weather Data
+```{r}
+weatherData <- read.csv("Weather_NYC_2018.csv")
+```
+
+```{r}
+#Merging two data set 
+test$date <- as.Date(test$starttime)
+weatherData <- weatherData %>%
+      mutate(DATE = mdy(DATE)) %>%
+      rename(date = DATE)
+
+weatherData$TAVG <- (weatherData$TMIN+weatherData$TMAX)/2
+
+dailySummary <- test %>%
+  group_by(date) %>%
+  summarise(
+    avgDistance = mean(dist, na.rm = TRUE),
+    avgDuration = mean(tripDurationMin, na.rm = TRUE),
+    avgSpeed = mean(mph, na.rm=TRUE)
+  )
+
+mergeTest1 <- merge(dailySummary, weatherData, by="date")
+```
+
+```{r eval=FALSE}
+mergeTest <- merge(test[, c("pastTime", "generation", "usertype", "gender", "date")], weatherData[ , c("date", "AWND", "TAVG", "SNOW", "PRCP")], by="date")
+```
+
+## Data Analysis
+
+```{r}
+ggplot(mergeTest1, aes(x=TAVG, y=avgDuration)) + geom_smooth() + labs(x= "Average Temperature", y="Average Duration")
+```
+
+```{}
+While it may be interesting to see, it seems that temperature does not have too much of an obvious effect on duration. When it is very cold trips actually take the longest time on avereage.
+```
+
+```{r}
+ggplot(mergeTest1, aes(x=TAVG, y=avgSpeed)) + geom_smooth() +  labs(x= "Average Temperature", y="Average Speed")
+```
+
+```{}
+
+```
+
+
+```{r}
+ggplot(mergeTest1, aes(x=AWND, y=avgDuration)) + geom_smooth() + labs(x= "Wind Level", y="Average Duration")
+```
+
+```{}
+All though the line itself is somewhat all over the place, the confidence interval is what speaks volumns here. As 
+```
+
+```{r}
+ggplot(mergeTest1, aes(x=PRCP, y=avgDuration)) + geom_smooth() + labs(x= "Precipitation Level", y="Average Duration")
+```
+
+```{}
+
+```
+
+```{r}
+ggplot(mergeTest1, aes(x=PRCP, y=avgSpeed)) + geom_smooth() + labs(x= "Precipitation Level", y="Average Speed")
+```
+
+```{}
+
+```
+
+# Question 5: Extra Analysis
+
+## Holiday Effect
+
+### Importing Holidays
+```{r}
+holidays <- read.csv("holidays.csv", header=FALSE)
+```
+
+
+### Building Data Set
+```{r}
+holidays <- holidays %>%
+  mutate(V1 = mdy(V1)) %>%
+  rename(date = V1)
+
+test <- test %>%
+  mutate(holiday = ifelse(date %in% holidays$date, TRUE, FALSE))
+```
+
+### Ploting
+```{r}
+ggplot(test, aes(x=pastTime, colour=holiday)) + geom_density()
+```
+
+```{}
+Here we see that there is still some influence if the day is a holiday but not as intense as the weekend does. We still see some signs of a bimodal distribution if there is a holiday. This indicates that, while there is significantly less usage at the peak work-travel times, there is still some sort of usage related to work. This could be worse becasue there is stead, high, sustained usage across the entirety of the day instead of peaks like there are on reguar days (non-holidays).
+```
